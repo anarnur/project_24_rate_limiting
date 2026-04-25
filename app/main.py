@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from slowapi.errors import RateLimitExceeded
+import json
 
 from app.models import PredictionRequest, PredictionResponse
 from app.inference import inference_service
@@ -26,6 +28,17 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://*.vercel.app",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(RateLimitExceeded)
@@ -56,7 +69,6 @@ async def health_check():
 @app.post("/generate", response_model=PredictionResponse)
 @limiter.limit("10/minute")
 async def generate_text(request: Request, body: PredictionRequest):
-    # Проверка на prompt injection
     injection_result = check_prompt_injection(body.prompt)
     if injection_result:
         return JSONResponse(
@@ -77,3 +89,34 @@ async def generate_text(request: Request, body: PredictionRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate/stream")
+@limiter.limit("10/minute")
+async def generate_stream(request: Request, body: PredictionRequest):
+    injection_result = check_prompt_injection(body.prompt)
+    if injection_result:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "prompt_injection_detected",
+                "detail": f"Запрос отклонён: обнаружен подозрительный паттерн ({injection_result}).",
+            },
+        )
+
+    async def token_generator():
+        try:
+            for token in inference_service.generate_stream(body.prompt, body.max_tokens):
+                yield f"data: {json.dumps({'text': token})}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        token_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
