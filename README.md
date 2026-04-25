@@ -1,95 +1,152 @@
-# Project 23 — Контейнеризация и облачное развертывание ИИ-приложения
+# Project 24 — Безопасность в продакшене
 
-## 1. Описание проекта
+Расширение Project 23: к существующему FastAPI-сервису генерации текста добавлены rate limiting, валидация входных данных и защита от prompt injection.
 
-FastAPI-приложение, обслуживающее языковую модель GPT-2. Принимает текстовый промпт и возвращает сгенерированный текст. Модель загружается автоматически с HuggingFace Hub при старте контейнера.
+---
 
-## 2. Архитектура
+## Что добавлено в Project 24
 
+| Файл | Изменение |
+|------|-----------|
+| `app/main.py` | Rate limiter, обработчик 429, проверка injection |
+| `app/models.py` | Строгая валидация полей через Pydantic v2 |
+| `app/rate_limiter.py` | Конфигурация slowapi |
+| `app/security.py` | Фильтр prompt injection (14 паттернов) |
+| `tests/test_validation.py` | Тесты валидации |
+| `tests/test_rate_limit.py` | Тесты rate limiting |
+| `tests/test_security.py` | Тесты безопасности |
+
+---
+
+## Механизмы безопасности
+
+### 1. Rate Limiting
+Библиотека: **slowapi**
+
+- Лимит: **10 запросов в минуту на IP** для эндпоинта `POST /generate`
+- При превышении: `429 Too Many Requests`
+
+```json
+{
+  "error": "rate_limit_exceeded",
+  "detail": "Превышен лимит запросов. Максимум 10 запросов в минуту на IP."
+}
 ```
-Пользователь → HTTP запрос
-    → FastAPI (app/main.py)
-        → Model Inference (app/inference.py) ← GPT-2 (HuggingFace Hub)
-    → JSON ответ
 
-FastAPI → Docker-образ → GitHub Actions (CI/CD) → Railway (облако)
+### 2. Валидация входных данных
+
+| Поле | Тип | Ограничения | По умолчанию |
+|------|-----|-------------|--------------|
+| `prompt` | `str` | Не пустой, не из пробелов, макс. 2000 символов | обязательный |
+| `max_tokens` | `int` | 1–2048 | 256 |
+| `temperature` | `float` | 0.0–2.0 | 0.7 |
+
+При нарушении: `422 Unprocessable Entity`
+
+### 3. Фильтр Prompt Injection (бонус)
+
+| Паттерн | Причина |
+|---------|---------|
+| `ignore previous instructions` | Сброс системного промпта |
+| `system:` / `[system]` | Имитация системного сообщения |
+| `you are now` / `act as` / `pretend you are` / `roleplay as` | Смена роли (jailbreak) |
+| `disregard your` / `forget your instructions` | Аннулирование контекста |
+| `do anything now` / `dan mode` | DAN-шаблоны |
+| `override safety` / `bypass restrictions` / `disable filters` | Отключение ограничений |
+
+При обнаружении: `400 Bad Request`
+
+```json
+{
+  "error": "prompt_injection_detected",
+  "detail": "Запрос отклонён: обнаружен подозрительный паттерн (act as)."
+}
 ```
 
-## 3. Переменные окружения
+---
 
-| Переменная   | Описание                                   | Пример        |
-|--------------|--------------------------------------------|---------------|
-| `MODEL_PATH` | Путь к локальным весам или название модели | `gpt2`        |
-| `PORT`       | Порт запуска сервера                       | `8000`        |
+## Запуск
 
-## 4. Локальный запуск (без Docker)
-
+### Windows
 ```bash
 python -m venv venv
-venv\Scripts\activate         # Windows
+venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --reload
 ```
 
-## 5. Запуск через Docker
+### MacOS / Linux
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Swagger UI: `http://localhost:8000/docs`
+
+### Docker
 
 ```bash
-# Сборка образа
-docker build -t genai-api .
-
-# Запуск контейнера
-docker run -p 8000:8000 -e MODEL_PATH=gpt2 genai-api
+docker build -t project-24 .
+docker run -p 8000:8000 -e MODEL_PATH=gpt2 project-24
 ```
 
-## 6. Ссылка на деплой
+---
 
-🌐 **https://project23docker-production.up.railway.app**
+## API
 
-- Swagger UI: https://project23docker-production.up.railway.app/docs
-- Health check: https://project23docker-production.up.railway.app/health
+### `POST /generate`
 
-## 7. Описание CI/CD
+**Запрос:**
+```json
+{
+  "prompt": "Напиши стихотворение о море",
+  "max_tokens": 256,
+  "temperature": 0.7
+}
+```
 
-Пайплайн запускается автоматически при каждом пуше в ветку `main`:
+**Успешный ответ (200):**
+```json
+{
+  "prompt": "Напиши стихотворение о море",
+  "generated_text": "...",
+  "model": "gpt2",
+  "tokens_used": 87
+}
+```
 
-1. **test** — устанавливает зависимости, запускает `ruff` (линтер) и `pytest` (6 тестов)
-2. **build** — собирает Docker-образ для проверки корректности Dockerfile
-3. **deploy** — деплоит на Railway только если тесты и сборка прошли успешно (`needs`)
-4. **smoke test** — после деплоя делает `curl /health` для проверки живости сервиса
+**Возможные ошибки:**
 
-## 8. Пример запроса и ответа
+| Код | Причина |
+|-----|---------|
+| 400 | Prompt injection |
+| 422 | Невалидные данные |
+| 429 | Превышен rate limit |
+| 500 | Ошибка модели |
+
+---
+
+## Тесты
 
 ```bash
-# Health check
-curl https://project23docker-production.up.railway.app/health
-# {"status":"ok"}
-
-# Информация о сервисе
-curl https://project23docker-production.up.railway.app/
-# {"service":"AI Production API","version":"1.0.0","description":"Fine-tuned LLM inference API"}
-
-# Генерация текста
-curl -X POST https://project23docker-production.up.railway.app/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Once upon a time", "max_tokens": 50}'
-
-# Ответ:
-# {
-#   "prompt": "Once upon a time",
-#   "generated_text": ", he found a good friend and quickly became acquainted...",
-#   "model": "gpt2",
-#   "tokens_used": 50
-# }
-
-# Невалидный запрос (ожидается 422)
-curl -X POST https://project23docker-production.up.railway.app/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": ""}'
+pytest tests/ -v
 ```
 
-## 9. Известные ограничения
+**Результат: 20 тестов, все прошли**
 
-- **Холодный старт**: при первом запросе модель GPT-2 загружается с HuggingFace (~500 МБ), это занимает 1–3 минуты
-- **CPU inference**: модель работает на CPU, генерация занимает 5–15 секунд
-- **Railway бесплатный план**: сервис может засыпать после простоя, первый запрос после сна занимает до 30 секунд
-- **Только английский язык**: GPT-2 обучена на английском тексте, русский промпт даст нечитаемый результат
+| Файл | Что тестирует |
+|------|---------------|
+| `test_api.py` | Базовые эндпоинты (Project 23) |
+| `test_validation.py` | Валидация полей |
+| `test_rate_limit.py` | Rate limiting и формат ответа 429 |
+| `test_security.py` | Обнаружение prompt injection паттернов |
+
+## Скриншоты
+
+### Все тесты пройдены
+![Tests](images/tests.png)
+
+### API главная страница
+![API](images/ai_api_page.png)
