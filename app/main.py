@@ -34,6 +34,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "https://*.vercel.app",
+        "https://project-25-frontend-oks8xvt69-anarnurs-projects.vercel.app",
     ],
     allow_credentials=False,
     allow_methods=["*"],
